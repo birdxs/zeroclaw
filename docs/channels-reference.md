@@ -119,7 +119,7 @@ cargo check --no-default-features --features hardware,channel-matrix
 cargo check --no-default-features --features hardware,channel-lark
 ```
 
-If `[channels_config.matrix]`, `[channels_config.lark]`, or `[channels_config.feishu]` is present but the corresponding feature is not compiled in, `zeroclaw channel list`, `zeroclaw channel doctor`, and `zeroclaw channel start` will report that the channel is intentionally skipped for this build.
+If `[channels_config.matrix]`, `[channels_config.lark]`, or `[channels_config.feishu]` is present but the corresponding feature is not compiled in, `zeroclaw channel list`, `zeroclaw channel doctor`, and `zeroclaw channel start` will report that the channel is intentionally skipped for this build. The same applies to cron delivery: setting `delivery.channel` to a feature-gated channel in a build without that feature will return an error at delivery time. For Matrix cron delivery, only plain rooms are supported; E2EE rooms require listener sessions via `zeroclaw daemon`.
 
 ---
 
@@ -143,6 +143,7 @@ If `[channels_config.matrix]`, `[channels_config.lark]`, or `[channels_config.fe
 | Feishu | websocket (default) or webhook | Webhook mode only |
 | DingTalk | stream mode | No |
 | QQ | bot gateway | No |
+| Napcat | websocket receive + HTTP send (OneBot) | No (typically local/LAN) |
 | Linq | webhook (`/linq`) | Yes (public HTTPS callback) |
 | iMessage | local integration | No |
 | Nostr | relay websocket (NIP-04 / NIP-17) | No |
@@ -159,7 +160,7 @@ For channels with inbound sender allowlists:
 
 Field names differ by channel:
 
-- `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/Feishu/DingTalk/QQ/Nextcloud Talk)
+- `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/Feishu/DingTalk/QQ/Napcat/Nextcloud Talk)
 - `allowed_from` (Signal)
 - `allowed_numbers` (WhatsApp)
 - `allowed_senders` (Email/Linq)
@@ -351,7 +352,11 @@ password = "email-password"
 from_address = "bot@example.com"
 poll_interval_secs = 60
 allowed_senders = ["*"]
+imap_id = { enabled = true, name = "zeroclaw", version = "0.1.7", vendor = "zeroclaw-labs" }
 ```
+
+`imap_id` sends RFC 2971 client metadata right after IMAP login. This is required by some providers
+(for example NetEase `163.com` / `126.com`) before mailbox selection is allowed.
 
 ### 4.10 IRC
 
@@ -472,7 +477,26 @@ Notes:
 - `X-Bot-Appid` is checked when present and must match `app_id`.
 - Set `receive_mode = "websocket"` to keep the legacy gateway WS receive path.
 
-### 4.16 Nextcloud Talk
+### 4.16 Napcat (QQ via OneBot)
+
+```toml
+[channels_config.napcat]
+websocket_url = "ws://127.0.0.1:3001"
+api_base_url = "http://127.0.0.1:3001"  # optional; auto-derived when omitted
+access_token = ""                         # optional
+allowed_users = ["*"]
+```
+
+Notes:
+
+- Inbound messages are consumed from Napcat's WebSocket stream.
+- Outbound sends use OneBot-compatible HTTP endpoints (`send_private_msg` / `send_group_msg`).
+- Recipients:
+  - `user:<qq_user_id>` for private messages
+  - `group:<qq_group_id>` for group messages
+- Outbound reply chaining uses incoming message ids via CQ reply tags.
+
+### 4.17 Nextcloud Talk
 
 ```toml
 [channels_config.nextcloud_talk]
@@ -490,7 +514,7 @@ Notes:
 - `ZEROCLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET` overrides config secret.
 - See [nextcloud-talk-setup.md](./nextcloud-talk-setup.md) for a full runbook.
 
-### 4.16 Linq
+### 4.18 Linq
 
 ```toml
 [channels_config.linq]
@@ -509,7 +533,7 @@ Notes:
 - `ZEROCLAW_LINQ_SIGNING_SECRET` overrides config secret.
 - `allowed_senders` uses E.164 phone number format (e.g. `+1234567890`).
 
-### 4.17 iMessage
+### 4.19 iMessage
 
 ```toml
 [channels_config.imessage]
