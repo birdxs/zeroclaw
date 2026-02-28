@@ -2,7 +2,7 @@
 
 This is a high-signal reference for common config sections and defaults.
 
-Last verified: **February 25, 2026**.
+Last verified: **February 28, 2026**.
 
 Config path resolution at startup:
 
@@ -309,6 +309,32 @@ min_prompt_chars = 40
 symbol_ratio_threshold = 0.25
 ```
 
+## `[security.outbound_leak_guard]`
+
+Controls outbound credential leak handling for channel replies after tool-output sanitization.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | Enable outbound credential leak scanning on channel responses |
+| `action` | `redact` | Leak handling mode: `redact` (mask and deliver) or `block` (do not deliver original content) |
+| `sensitivity` | `0.7` | Leak detector sensitivity (`0.0` to `1.0`, higher is more aggressive) |
+
+Notes:
+
+- Detection uses the same leak detector used by existing redaction guardrails (API keys, JWTs, private keys, high-entropy tokens, etc.).
+- `action = "redact"` preserves current behavior (safe-by-default compatibility).
+- `action = "block"` is stricter and returns a safe fallback message instead of potentially sensitive content.
+- When this guard is enabled, `/v1/chat/completions` streaming responses are safety-buffered and emitted after sanitization to avoid leaking raw token deltas before final scan.
+
+Example:
+
+```toml
+[security.outbound_leak_guard]
+enabled = true
+action = "block"
+sensitivity = 0.9
+```
+
 ## `[agents.<name>]`
 
 Delegate sub-agent configurations. Each key under `[agents]` defines a named sub-agent that the primary agent can delegate to.
@@ -605,6 +631,7 @@ Notes:
 | `max_response_size` | `1000000` | Maximum response size in bytes (default: 1 MB) |
 | `timeout_secs` | `30` | Request timeout in seconds |
 | `user_agent` | `ZeroClaw/1.0` | User-Agent header for outbound HTTP requests |
+| `credential_profiles` | `{}` | Optional named env-backed auth profiles used by tool arg `credential_profile` |
 
 Notes:
 
@@ -612,6 +639,36 @@ Notes:
 - Use exact domain or subdomain matching (e.g. `"api.example.com"`, `"example.com"`), or `"*"` to allow any public domain.
 - Local/private targets are still blocked even when `"*"` is configured.
 - Shell `curl`/`wget` are classified as high-risk and may be blocked by autonomy policy. Prefer `http_request` for direct HTTP calls.
+- `credential_profiles` lets the harness inject auth headers from environment variables, so agents can call authenticated APIs without raw tokens in tool arguments.
+
+Example:
+
+```toml
+[http_request]
+enabled = true
+allowed_domains = ["api.github.com", "api.linear.app"]
+
+[http_request.credential_profiles.github]
+header_name = "Authorization"
+env_var = "GITHUB_TOKEN"
+value_prefix = "Bearer "
+
+[http_request.credential_profiles.linear]
+header_name = "Authorization"
+env_var = "LINEAR_API_KEY"
+value_prefix = ""
+```
+
+Then call `http_request` with:
+
+```json
+{
+  "url": "https://api.github.com/user",
+  "credential_profile": "github"
+}
+```
+
+When using `credential_profile`, do not also set the same header key in `args.headers` (case-insensitive), or the request will be rejected as a header conflict.
 
 ## `[web_fetch]`
 
@@ -769,6 +826,8 @@ Environment overrides:
 | `max_cost_per_day_cents` | `500` | per-policy spend guardrail |
 | `require_approval_for_medium_risk` | `true` | approval gate for medium-risk commands |
 | `block_high_risk_commands` | `true` | hard block for high-risk commands |
+| `allow_sensitive_file_reads` | `false` | allow `file_read` on sensitive files/dirs (for example `.env`, `.aws/credentials`, private keys) |
+| `allow_sensitive_file_writes` | `false` | allow `file_write`/`file_edit` on sensitive files/dirs (for example `.env`, `.aws/credentials`, private keys) |
 | `auto_approve` | `[]` | tool operations always auto-approved |
 | `always_ask` | `[]` | tool operations that always require approval |
 | `non_cli_excluded_tools` | `[]` | tools hidden from non-CLI channel tool specs |
@@ -782,6 +841,9 @@ Notes:
 - Access outside the workspace requires `allowed_roots`, even when `workspace_only = false`.
 - `allowed_roots` supports absolute paths, `~/...`, and workspace-relative paths.
 - `allowed_commands` entries can be command names (for example, `"git"`), explicit executable paths (for example, `"/usr/bin/antigravity"`), or `"*"` to allow any command name/path (risk gates still apply).
+- `file_read` blocks sensitive secret-bearing files/directories by default. Set `allow_sensitive_file_reads = true` only for controlled debugging sessions.
+- `file_write` and `file_edit` block sensitive secret-bearing files/directories by default. Set `allow_sensitive_file_writes = true` only for controlled break-glass sessions.
+- `file_read`, `file_write`, and `file_edit` refuse multiply-linked files (hard-link guard) to reduce workspace path bypass risk via hard-link escapes.
 - Shell separator/operator parsing is quote-aware. Characters like `;` inside quoted arguments are treated as literals, not command separators.
 - Unquoted shell chaining/operators are still enforced by policy checks (`;`, `|`, `&&`, `||`, background chaining, and redirects).
 - In supervised mode on non-CLI channels, operators can persist human-approved tools with:

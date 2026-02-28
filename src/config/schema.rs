@@ -748,6 +748,20 @@ pub struct AgentConfig {
     /// Set to `0` to disable. Default: `3`.
     #[serde(default = "default_loop_detection_failure_streak")]
     pub loop_detection_failure_streak: usize,
+    /// Safety heartbeat injection interval inside `run_tool_call_loop`.
+    /// Injects a security-constraint reminder every N tool iterations.
+    /// Set to `0` to disable. Default: `5`.
+    /// Compatibility/rollback: omit/remove this key to use default (`5`), or set
+    /// to `0` for explicit disable.
+    #[serde(default = "default_safety_heartbeat_interval")]
+    pub safety_heartbeat_interval: usize,
+    /// Safety heartbeat injection interval for interactive sessions.
+    /// Injects a security-constraint reminder every N conversation turns.
+    /// Set to `0` to disable. Default: `10`.
+    /// Compatibility/rollback: omit/remove this key to use default (`10`), or
+    /// set to `0` for explicit disable.
+    #[serde(default = "default_safety_heartbeat_turn_interval")]
+    pub safety_heartbeat_turn_interval: usize,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -774,6 +788,14 @@ fn default_loop_detection_failure_streak() -> usize {
     3
 }
 
+fn default_safety_heartbeat_interval() -> usize {
+    5
+}
+
+fn default_safety_heartbeat_turn_interval() -> usize {
+    10
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -785,6 +807,8 @@ impl Default for AgentConfig {
             loop_detection_no_progress_threshold: default_loop_detection_no_progress_threshold(),
             loop_detection_ping_pong_cycles: default_loop_detection_ping_pong_cycles(),
             loop_detection_failure_streak: default_loop_detection_failure_streak(),
+            safety_heartbeat_interval: default_safety_heartbeat_interval(),
+            safety_heartbeat_turn_interval: default_safety_heartbeat_turn_interval(),
         }
     }
 }
@@ -1549,6 +1573,40 @@ impl Default for BrowserConfig {
 ///
 /// Deny-by-default: if `allowed_domains` is empty, all HTTP requests are rejected.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HttpRequestCredentialProfile {
+    /// Header name to inject (for example `Authorization` or `X-API-Key`)
+    #[serde(default = "default_http_request_credential_header_name")]
+    pub header_name: String,
+    /// Environment variable containing the secret/token value
+    #[serde(default)]
+    pub env_var: String,
+    /// Optional prefix prepended to the secret (for example `Bearer `)
+    #[serde(default)]
+    pub value_prefix: String,
+}
+
+impl Default for HttpRequestCredentialProfile {
+    fn default() -> Self {
+        Self {
+            header_name: default_http_request_credential_header_name(),
+            env_var: String::new(),
+            value_prefix: default_http_request_credential_value_prefix(),
+        }
+    }
+}
+
+fn default_http_request_credential_header_name() -> String {
+    "Authorization".into()
+}
+
+fn default_http_request_credential_value_prefix() -> String {
+    "Bearer ".into()
+}
+
+/// HTTP request tool configuration (`[http_request]` section).
+///
+/// Deny-by-default: if `allowed_domains` is empty, all HTTP requests are rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HttpRequestConfig {
     /// Enable `http_request` tool for API interactions
     #[serde(default)]
@@ -1565,6 +1623,15 @@ pub struct HttpRequestConfig {
     /// User-Agent string sent with HTTP requests (env: ZEROCLAW_HTTP_REQUEST_USER_AGENT)
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
+    /// Optional named credential profiles for env-backed auth injection.
+    ///
+    /// Example:
+    /// `[http_request.credential_profiles.github]`
+    /// `env_var = "GITHUB_TOKEN"`
+    /// `header_name = "Authorization"`
+    /// `value_prefix = "Bearer "`
+    #[serde(default)]
+    pub credential_profiles: HashMap<String, HttpRequestCredentialProfile>,
 }
 
 impl Default for HttpRequestConfig {
@@ -1575,6 +1642,7 @@ impl Default for HttpRequestConfig {
             max_response_size: default_http_max_response_size(),
             timeout_secs: default_http_timeout_secs(),
             user_agent: default_user_agent(),
+            credential_profiles: HashMap::new(),
         }
     }
 }
@@ -2830,6 +2898,20 @@ pub struct AutonomyConfig {
     #[serde(default)]
     pub shell_env_passthrough: Vec<String>,
 
+    /// Allow `file_read` to access sensitive workspace secrets such as `.env`,
+    /// key material, and credential files.
+    ///
+    /// Default is `false` to reduce accidental secret exposure via tool output.
+    #[serde(default)]
+    pub allow_sensitive_file_reads: bool,
+
+    /// Allow `file_write` / `file_edit` to modify sensitive workspace secrets
+    /// such as `.env`, key material, and credential files.
+    ///
+    /// Default is `false` to reduce accidental secret corruption/exfiltration.
+    #[serde(default)]
+    pub allow_sensitive_file_writes: bool,
+
     /// Tools that never require approval (e.g. read-only tools).
     #[serde(default = "default_auto_approve")]
     pub auto_approve: Vec<String>,
@@ -2980,6 +3062,8 @@ impl Default for AutonomyConfig {
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],
+            allow_sensitive_file_reads: false,
+            allow_sensitive_file_writes: false,
             auto_approve: default_auto_approve(),
             always_ask: default_always_ask(),
             allowed_roots: Vec::new(),
@@ -3953,6 +4037,10 @@ fn default_draft_update_interval_ms() -> u64 {
     1000
 }
 
+fn default_ack_enabled() -> bool {
+    true
+}
+
 /// Group-chat reply trigger mode for channels that support mention gating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -4039,6 +4127,10 @@ pub struct TelegramConfig {
     /// Example for Bale messenger: "https://tapi.bale.ai"
     #[serde(default)]
     pub base_url: Option<String>,
+    /// When true, send emoji reaction acknowledgments (⚡️, 👌, 👀, 🔥, 👍) to incoming messages.
+    /// When false, no reaction is sent. Default is true.
+    #[serde(default = "default_ack_enabled")]
+    pub ack_enabled: bool,
 }
 
 impl ChannelConfig for TelegramConfig {
@@ -4677,9 +4769,55 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub perplexity_filter: PerplexityFilterConfig,
 
+    /// Outbound credential leak guard for channel replies.
+    #[serde(default)]
+    pub outbound_leak_guard: OutboundLeakGuardConfig,
+
     /// Shared URL access policy for network-enabled tools.
     #[serde(default)]
     pub url_access: UrlAccessConfig,
+}
+
+/// Outbound leak handling mode for channel responses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutboundLeakGuardAction {
+    /// Redact suspicious credentials and continue delivery.
+    #[default]
+    Redact,
+    /// Block delivery when suspicious credentials are detected.
+    Block,
+}
+
+/// Outbound credential leak guard configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundLeakGuardConfig {
+    /// Enable outbound credential leak scanning for channel responses.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Action to take when potential credentials are detected.
+    #[serde(default)]
+    pub action: OutboundLeakGuardAction,
+
+    /// Detection sensitivity (0.0-1.0, higher = more aggressive).
+    #[serde(default = "default_outbound_leak_guard_sensitivity")]
+    pub sensitivity: f64,
+}
+
+fn default_outbound_leak_guard_sensitivity() -> f64 {
+    0.7
+}
+
+impl Default for OutboundLeakGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            action: OutboundLeakGuardAction::Redact,
+            sensitivity: default_outbound_leak_guard_sensitivity(),
+        }
+    }
 }
 
 /// Lightweight perplexity-style filter configuration.
@@ -6687,6 +6825,46 @@ impl Config {
                 "security.url_access.enforce_domain_allowlist=true requires non-empty security.url_access.domain_allowlist"
             );
         }
+        let mut seen_http_credential_profiles = std::collections::HashSet::new();
+        for (profile_name, profile) in &self.http_request.credential_profiles {
+            let normalized_name = profile_name.trim();
+            if normalized_name.is_empty() {
+                anyhow::bail!("http_request.credential_profiles keys must not be empty");
+            }
+            if !normalized_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                anyhow::bail!(
+                    "http_request.credential_profiles.{profile_name} contains invalid characters"
+                );
+            }
+            let canonical_name = normalized_name.to_ascii_lowercase();
+            if !seen_http_credential_profiles.insert(canonical_name) {
+                anyhow::bail!(
+                    "http_request.credential_profiles contains duplicate profile name: {normalized_name}"
+                );
+            }
+
+            let header_name = profile.header_name.trim();
+            if header_name.is_empty() {
+                anyhow::bail!(
+                    "http_request.credential_profiles.{profile_name}.header_name must not be empty"
+                );
+            }
+            if let Err(e) = reqwest::header::HeaderName::from_bytes(header_name.as_bytes()) {
+                anyhow::bail!(
+                    "http_request.credential_profiles.{profile_name}.header_name is invalid: {e}"
+                );
+            }
+
+            let env_var = profile.env_var.trim();
+            if !is_valid_env_var_name(env_var) {
+                anyhow::bail!(
+                    "http_request.credential_profiles.{profile_name}.env_var is invalid ({env_var}); expected [A-Za-z_][A-Za-z0-9_]*"
+                );
+            }
+        }
         let built_in_roles = ["owner", "admin", "operator", "viewer", "guest"];
         let mut custom_role_names = std::collections::HashSet::new();
         for (i, role) in self.security.roles.iter().enumerate() {
@@ -6847,6 +7025,9 @@ impl Config {
             anyhow::bail!(
                 "security.perplexity_filter.symbol_ratio_threshold must be between 0.0 and 1.0"
             );
+        }
+        if !(0.0..=1.0).contains(&self.security.outbound_leak_guard.sensitivity) {
+            anyhow::bail!("security.outbound_leak_guard.sensitivity must be between 0.0 and 1.0");
         }
 
         // Browser
@@ -7947,6 +8128,7 @@ mod tests {
         assert_eq!(cfg.max_response_size, 1_000_000);
         assert!(!cfg.enabled);
         assert!(cfg.allowed_domains.is_empty());
+        assert!(cfg.credential_profiles.is_empty());
     }
 
     #[test]
@@ -8035,6 +8217,7 @@ mod tests {
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
@@ -8162,6 +8345,8 @@ mod tests {
         assert!(a.require_approval_for_medium_risk);
         assert!(a.block_high_risk_commands);
         assert!(a.shell_env_passthrough.is_empty());
+        assert!(!a.allow_sensitive_file_reads);
+        assert!(!a.allow_sensitive_file_writes);
         assert!(a.non_cli_excluded_tools.contains(&"shell".to_string()));
         assert!(a.non_cli_excluded_tools.contains(&"delegate".to_string()));
     }
@@ -8183,6 +8368,14 @@ always_ask = []
 allowed_roots = []
 "#;
         let parsed: AutonomyConfig = toml::from_str(raw).unwrap();
+        assert!(
+            !parsed.allow_sensitive_file_reads,
+            "Missing allow_sensitive_file_reads must default to false"
+        );
+        assert!(
+            !parsed.allow_sensitive_file_writes,
+            "Missing allow_sensitive_file_writes must default to false"
+        );
         assert!(parsed.non_cli_excluded_tools.contains(&"shell".to_string()));
         assert!(parsed
             .non_cli_excluded_tools
@@ -8349,6 +8542,8 @@ default_temperature = 0.7
                 require_approval_for_medium_risk: false,
                 block_high_risk_commands: true,
                 shell_env_passthrough: vec!["DATABASE_URL".into()],
+                allow_sensitive_file_reads: false,
+                allow_sensitive_file_writes: false,
                 auto_approve: vec!["file_read".into()],
                 always_ask: vec![],
                 allowed_roots: vec![],
@@ -8390,6 +8585,7 @@ default_temperature = 0.7
                     draft_update_interval_ms: default_draft_update_interval_ms(),
                     interrupt_on_new_message: false,
                     mention_only: false,
+                    ack_enabled: true,
                     group_reply: None,
                     base_url: None,
                 }),
@@ -8863,6 +9059,7 @@ tool_dispatcher = "xml"
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
@@ -9046,6 +9243,7 @@ tool_dispatcher = "xml"
             draft_update_interval_ms: 500,
             interrupt_on_new_message: true,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         };
@@ -11905,6 +12103,12 @@ default_temperature = 0.7
         assert!(parsed.security.url_access.domain_blocklist.is_empty());
         assert!(parsed.security.url_access.approved_domains.is_empty());
         assert!(!parsed.security.perplexity_filter.enable_perplexity_filter);
+        assert!(parsed.security.outbound_leak_guard.enabled);
+        assert_eq!(
+            parsed.security.outbound_leak_guard.action,
+            OutboundLeakGuardAction::Redact
+        );
+        assert_eq!(parsed.security.outbound_leak_guard.sensitivity, 0.7);
     }
 
     #[test]
@@ -11959,6 +12163,11 @@ perplexity_threshold = 16.5
 suffix_window_chars = 72
 min_prompt_chars = 40
 symbol_ratio_threshold = 0.25
+
+[security.outbound_leak_guard]
+enabled = true
+action = "block"
+sensitivity = 0.9
 "#,
         )
         .unwrap();
@@ -11985,6 +12194,12 @@ symbol_ratio_threshold = 0.25
             parsed.security.perplexity_filter.symbol_ratio_threshold,
             0.25
         );
+        assert!(parsed.security.outbound_leak_guard.enabled);
+        assert_eq!(
+            parsed.security.outbound_leak_guard.action,
+            OutboundLeakGuardAction::Block
+        );
+        assert_eq!(parsed.security.outbound_leak_guard.sensitivity, 0.9);
         assert_eq!(parsed.security.otp.gated_actions.len(), 2);
         assert_eq!(parsed.security.otp.gated_domains.len(), 2);
         assert_eq!(
@@ -12073,6 +12288,45 @@ symbol_ratio_threshold = 0.25
         assert!(err
             .to_string()
             .contains("security.url_access.enforce_domain_allowlist"));
+    }
+
+    #[test]
+    async fn security_validation_rejects_invalid_http_credential_profile_env_var() {
+        let mut config = Config::default();
+        config.http_request.credential_profiles.insert(
+            "github".to_string(),
+            HttpRequestCredentialProfile {
+                env_var: "NOT VALID".to_string(),
+                ..HttpRequestCredentialProfile::default()
+            },
+        );
+
+        let err = config
+            .validate()
+            .expect_err("expected invalid http credential env var");
+        assert!(err
+            .to_string()
+            .contains("http_request.credential_profiles.github.env_var"));
+    }
+
+    #[test]
+    async fn security_validation_rejects_empty_http_credential_profile_header_name() {
+        let mut config = Config::default();
+        config.http_request.credential_profiles.insert(
+            "linear".to_string(),
+            HttpRequestCredentialProfile {
+                header_name: "   ".to_string(),
+                env_var: "LINEAR_API_KEY".to_string(),
+                ..HttpRequestCredentialProfile::default()
+            },
+        );
+
+        let err = config
+            .validate()
+            .expect_err("expected empty header_name validation failure");
+        assert!(err
+            .to_string()
+            .contains("http_request.credential_profiles.linear.header_name"));
     }
 
     #[test]
@@ -12233,6 +12487,19 @@ symbol_ratio_threshold = 0.25
             .validate()
             .expect_err("expected perplexity symbol ratio validation failure");
         assert!(err.to_string().contains("symbol_ratio_threshold"));
+    }
+
+    #[test]
+    async fn security_validation_rejects_invalid_outbound_leak_guard_sensitivity() {
+        let mut config = Config::default();
+        config.security.outbound_leak_guard.sensitivity = 1.2;
+
+        let err = config
+            .validate()
+            .expect_err("expected outbound leak guard sensitivity validation failure");
+        assert!(err
+            .to_string()
+            .contains("security.outbound_leak_guard.sensitivity"));
     }
 
     #[test]
