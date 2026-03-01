@@ -18,6 +18,10 @@ use crate::memory::{
     classify_memory_backend, default_memory_backend_key, memory_backend_profile,
     selectable_memory_backends, MemoryBackendKind,
 };
+use crate::migration::{
+    load_config_without_env, migrate_openclaw, resolve_openclaw_config, resolve_openclaw_workspace,
+    OpenClawMigrationOptions,
+};
 use crate::providers::{
     canonical_china_provider_name, is_doubao_alias, is_glm_alias, is_glm_cn_alias,
     is_minimax_alias, is_moonshot_alias, is_qianfan_alias, is_qwen_alias, is_qwen_oauth_alias,
@@ -43,6 +47,13 @@ pub struct ProjectContext {
     pub timezone: String,
     pub agent_name: String,
     pub communication_style: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OpenClawOnboardMigrationOptions {
+    pub enabled: bool,
+    pub source_workspace: Option<PathBuf>,
+    pub source_config: Option<PathBuf>,
 }
 
 // ── Banner ───────────────────────────────────────────────────────
@@ -81,6 +92,17 @@ enum InteractiveOnboardingMode {
 }
 
 pub async fn run_wizard(force: bool) -> Result<Config> {
+    Box::pin(run_wizard_with_migration(
+        force,
+        OpenClawOnboardMigrationOptions::default(),
+    ))
+    .await
+}
+
+pub async fn run_wizard_with_migration(
+    force: bool,
+    migration_options: OpenClawOnboardMigrationOptions,
+) -> Result<Config> {
     println!("{}", style(BANNER).cyan().bold());
 
     println!(
@@ -100,7 +122,23 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
     match resolve_interactive_onboarding_mode(&config_path, force)? {
         InteractiveOnboardingMode::FullOnboarding => {}
         InteractiveOnboardingMode::UpdateProviderOnly => {
-            return run_provider_update_wizard(&workspace_dir, &config_path).await;
+            let raw = fs::read_to_string(&config_path).await.with_context(|| {
+                format!(
+                    "Failed to read existing config at {}",
+                    config_path.display()
+                )
+            })?;
+            let mut existing_config: Config = toml::from_str(&raw).with_context(|| {
+                format!(
+                    "Failed to parse existing config at {}",
+                    config_path.display()
+                )
+            })?;
+            existing_config.workspace_dir = workspace_dir.to_path_buf();
+            existing_config.config_path = config_path.to_path_buf();
+            maybe_run_openclaw_migration(&mut existing_config, &migration_options, true).await?;
+            let config = run_provider_update_wizard(&workspace_dir, &config_path).await?;
+            return Ok(config);
         }
     }
 
@@ -142,7 +180,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
 
     // ── Build config ──
     // Defaults: SQLite memory, supervised autonomy, workspace-scoped, native runtime
-    let config = Config {
+    let mut config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         api_key: if api_key.is_empty() {
@@ -215,6 +253,8 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
 
     config.save().await?;
     persist_workspace_selection(&config.config_path).await?;
+
+    maybe_run_openclaw_migration(&mut config, &migration_options, true).await?;
 
     // ── Final summary ────────────────────────────────────────────
     print_summary(&config);
@@ -381,7 +421,7 @@ fn apply_provider_update(
 // ── Quick setup (zero prompts) ───────────────────────────────────
 
 /// Non-interactive setup: generates a sensible default config instantly.
-/// Use `zeroclaw onboard` or `zeroclaw onboard --api-key sk-... --provider openrouter --memory sqlite|lucid`.
+/// Use `zeroclaw onboard` or `zeroclaw onboard --api-key sk-... --provider openrouter --memory sqlite|lucid|cortex-mem`.
 /// Use `zeroclaw onboard --interactive` for the full wizard.
 fn backend_key_from_choice(choice: usize) -> &'static str {
     selectable_memory_backends()
@@ -432,11 +472,36 @@ pub async fn run_quick_setup(
     force: bool,
     no_totp: bool,
 ) -> Result<Config> {
+    Box::pin(run_quick_setup_with_migration(
+        credential_override,
+        provider,
+        model_override,
+        memory_backend,
+        force,
+        no_totp,
+        OpenClawOnboardMigrationOptions::default(),
+    ))
+    .await
+}
+
+pub async fn run_quick_setup_with_migration(
+    credential_override: Option<&str>,
+    provider: Option<&str>,
+    model_override: Option<&str>,
+    memory_backend: Option<&str>,
+    force: bool,
+    no_totp: bool,
+    migration_options: OpenClawOnboardMigrationOptions,
+) -> Result<Config> {
+    let migration_requested = migration_options.enabled
+        || migration_options.source_workspace.is_some()
+        || migration_options.source_config.is_some();
+
     let home = directories::UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
         .context("Could not find home directory")?;
 
-    run_quick_setup_with_home(
+    let mut config = run_quick_setup_with_home(
         credential_override,
         provider,
         model_override,
@@ -445,7 +510,130 @@ pub async fn run_quick_setup(
         no_totp,
         &home,
     )
-    .await
+    .await?;
+
+    maybe_run_openclaw_migration(&mut config, &migration_options, false).await?;
+
+    if migration_requested {
+        println!();
+        println!(
+            "  {} Post-migration summary (updated configuration):",
+            style("↻").cyan().bold()
+        );
+        print_summary(&config);
+    }
+    Ok(config)
+}
+
+async fn maybe_run_openclaw_migration(
+    config: &mut Config,
+    options: &OpenClawOnboardMigrationOptions,
+    allow_interactive_prompt: bool,
+) -> Result<()> {
+    let resolved_workspace = resolve_openclaw_workspace(options.source_workspace.clone())?;
+    let resolved_config = resolve_openclaw_config(options.source_config.clone())?;
+
+    let auto_detected = resolved_workspace.exists() || resolved_config.exists();
+    let should_run = if options.enabled {
+        true
+    } else if allow_interactive_prompt && auto_detected {
+        println!();
+        println!(
+            "  {} OpenClaw data detected. Optional merge migration is available.",
+            style("↻").cyan().bold()
+        );
+        Confirm::new()
+            .with_prompt(
+                "  Merge OpenClaw data into this ZeroClaw workspace now? (preserve existing data)",
+            )
+            .default(true)
+            .interact()?
+    } else {
+        false
+    };
+
+    if !should_run {
+        return Ok(());
+    }
+
+    println!(
+        "  {} Running OpenClaw merge migration...",
+        style("↻").cyan().bold()
+    );
+
+    let report = migrate_openclaw(
+        config,
+        OpenClawMigrationOptions {
+            source_workspace: if options.source_workspace.is_some() || resolved_workspace.exists() {
+                Some(resolved_workspace.clone())
+            } else {
+                None
+            },
+            source_config: if options.source_config.is_some() || resolved_config.exists() {
+                Some(resolved_config.clone())
+            } else {
+                None
+            },
+            include_memory: true,
+            include_config: true,
+            dry_run: false,
+        },
+    )
+    .await?;
+
+    *config = load_config_without_env(config)?;
+
+    let report_json = serde_json::to_value(&report).unwrap_or(Value::Null);
+    let metric = |pointer: &str| -> u64 {
+        report_json
+            .pointer(pointer)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+
+    let changed_units = metric("/memory/imported")
+        + metric("/memory/renamed_conflicts")
+        + metric("/config/defaults_added")
+        + metric("/config/channels_added")
+        + metric("/config/channels_merged")
+        + metric("/config/agents_added")
+        + metric("/config/agents_merged")
+        + metric("/config/agent_tools_added");
+
+    if changed_units > 0 {
+        println!(
+            "  {} OpenClaw migration merged successfully",
+            style("✓").green().bold()
+        );
+    } else {
+        println!(
+            "  {} OpenClaw migration completed with no data changes",
+            style("✓").green().bold()
+        );
+    }
+
+    if let Some(backups) = report_json.get("backups").and_then(Value::as_array) {
+        if !backups.is_empty() {
+            println!("  {} Backups:", style("🛟").cyan().bold());
+            for backup in backups {
+                if let Some(path) = backup.as_str() {
+                    println!("    - {path}");
+                }
+            }
+        }
+    }
+
+    if let Some(notes) = report_json.get("notes").and_then(Value::as_array) {
+        if !notes.is_empty() {
+            println!("  {} Notes:", style("ℹ").cyan().bold());
+            for note in notes {
+                if let Some(text) = note.as_str() {
+                    println!("    - {text}");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_quick_setup_dirs_with_home(home: &Path) -> (PathBuf, PathBuf) {
@@ -787,8 +975,7 @@ fn default_model_for_provider(provider: &str) -> String {
         "qwen-code" => "qwen3-coder-plus".into(),
         "ollama" => "llama3.2".into(),
         "llamacpp" => "ggml-org/gpt-oss-20b-GGUF".into(),
-        "sglang" | "vllm" | "osaurus" => "default".into(),
-        "copilot" => "default".into(),
+        "sglang" | "vllm" | "osaurus" | "copilot" => "default".into(),
         "gemini" => "gemini-2.5-pro".into(),
         "kimi-code" => "kimi-for-coding".into(),
         "bedrock" => "anthropic.claude-sonnet-4-5-20250929-v1:0".into(),
@@ -3137,9 +3324,8 @@ fn prompt_allowed_domains_for_tool(tool_name: &str) -> Result<Vec<String>> {
                     anyhow::bail!(
                         "Custom domain list cannot be empty. Use 'Allow all public domains (*)' if that is intended."
                     )
-                } else {
-                    Ok(domains)
                 }
+                Ok(domains)
             }
         };
     }
@@ -4479,6 +4665,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     } else {
                         Some(channel)
                     },
+                    channel_ids: vec![],
                     allowed_users,
                     group_reply: None,
                 });
@@ -8328,8 +8515,9 @@ mod tests {
     fn backend_key_from_choice_maps_supported_backends() {
         assert_eq!(backend_key_from_choice(0), "sqlite");
         assert_eq!(backend_key_from_choice(1), "lucid");
-        assert_eq!(backend_key_from_choice(2), "markdown");
-        assert_eq!(backend_key_from_choice(3), "none");
+        assert_eq!(backend_key_from_choice(2), "cortex-mem");
+        assert_eq!(backend_key_from_choice(3), "markdown");
+        assert_eq!(backend_key_from_choice(4), "none");
         assert_eq!(backend_key_from_choice(999), "sqlite");
     }
 
@@ -8340,6 +8528,12 @@ mod tests {
         assert!(lucid.uses_sqlite_hygiene);
         assert!(lucid.sqlite_based);
         assert!(lucid.optional_dependency);
+
+        let cortex_mem = memory_backend_profile("cortex-mem");
+        assert!(cortex_mem.auto_save_default);
+        assert!(cortex_mem.uses_sqlite_hygiene);
+        assert!(cortex_mem.sqlite_based);
+        assert!(cortex_mem.optional_dependency);
 
         let markdown = memory_backend_profile("markdown");
         assert!(markdown.auto_save_default);
