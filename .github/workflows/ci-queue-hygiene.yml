@@ -42,7 +42,7 @@ env:
 jobs:
     hygiene:
         name: Queue Hygiene
-        runs-on: ubuntu-22.04
+        runs-on: [self-hosted, Linux, X64, aws-india]
         timeout-minutes: 15
         steps:
             - name: Checkout
