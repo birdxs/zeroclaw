@@ -35,7 +35,7 @@ use uuid::Uuid;
 mod context;
 pub(crate) mod detection;
 mod execution;
-mod history;
+pub(crate) mod history;
 mod parsing;
 
 use context::{build_context, build_hardware_context};
@@ -46,7 +46,7 @@ use execution::{
 };
 #[cfg(test)]
 use history::{apply_compaction_summary, build_compaction_transcript};
-use history::{auto_compact_history, trim_history};
+use history::{auto_compact_history, extract_facts_from_turns, trim_history, TurnBuffer};
 #[allow(unused_imports)]
 use parsing::{
     default_param_for_tool, detect_tool_call_parse_issue, extract_json_values, map_tool_name_alias,
@@ -79,6 +79,54 @@ const CANARY_EXFILTRATION_BLOCK_MESSAGE: &str =
 /// Minimum user-message length (in chars) for auto-save to memory.
 /// Matches the channel-side constant in `channels/mod.rs`.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
+
+fn filter_primary_agent_tools_or_fail(
+    config: &Config,
+    tools_registry: Vec<Box<dyn Tool>>,
+) -> Result<Vec<Box<dyn Tool>>> {
+    let (filtered_tools, report) = tools::filter_primary_agent_tools(
+        tools_registry,
+        &config.agent.allowed_tools,
+        &config.agent.denied_tools,
+    );
+
+    for unmatched in report.unmatched_allowed_tools {
+        tracing::debug!(
+            tool = %unmatched,
+            "agent.allowed_tools entry did not match any registered tool"
+        );
+    }
+
+    let has_agent_allowlist = config
+        .agent
+        .allowed_tools
+        .iter()
+        .any(|entry| !entry.trim().is_empty());
+    let has_agent_denylist = config
+        .agent
+        .denied_tools
+        .iter()
+        .any(|entry| !entry.trim().is_empty());
+    if has_agent_allowlist
+        && has_agent_denylist
+        && report.allowlist_match_count > 0
+        && filtered_tools.is_empty()
+    {
+        anyhow::bail!(
+            "agent.allowed_tools and agent.denied_tools removed all executable tools; update [agent] tool filters"
+        );
+    }
+
+    Ok(filtered_tools)
+}
+
+fn retain_visible_tool_descriptions<'a>(
+    tool_descs: &mut Vec<(&'a str, &'a str)>,
+    tools_registry: &[Box<dyn Tool>],
+) {
+    let visible_tools: HashSet<&str> = tools_registry.iter().map(|tool| tool.name()).collect();
+    tool_descs.retain(|(name, _)| visible_tools.contains(*name));
+}
 
 fn should_treat_provider_as_vision_capable(provider_name: &str, provider: &dyn Provider) -> bool {
     if provider.supports_vision() {
@@ -627,11 +675,18 @@ fn stop_reason_name(reason: &NormalizedStopReason) -> &'static str {
     }
 }
 
+fn is_legacy_cron_model_fallback(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "gpt-4o-mini" | "openai/gpt-4o-mini")
+}
+
 fn maybe_inject_cron_add_delivery(
     tool_name: &str,
     tool_args: &mut serde_json::Value,
     channel_name: &str,
     reply_target: Option<&str>,
+    provider_name: &str,
+    active_model: &str,
 ) {
     if tool_name != "cron_add"
         || !AUTO_CRON_DELIVERY_CHANNELS
@@ -698,6 +753,44 @@ fn maybe_inject_cron_add_delivery(
         delivery_obj.insert(
             "to".to_string(),
             serde_json::Value::String(reply_target.to_string()),
+        );
+    }
+
+    let active_model = active_model.trim();
+    if active_model.is_empty() {
+        return;
+    }
+
+    let model_missing = args_obj
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|value| value.trim().is_empty());
+    if model_missing {
+        args_obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(active_model.to_string()),
+        );
+        return;
+    }
+
+    let is_custom_provider = provider_name
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("custom:");
+    if !is_custom_provider {
+        return;
+    }
+
+    let should_replace_model = args_obj
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| {
+            is_legacy_cron_model_fallback(value) && !value.trim().eq_ignore_ascii_case(active_model)
+        });
+    if should_replace_model {
+        args_obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(active_model.to_string()),
         );
     }
 }
@@ -1980,6 +2073,8 @@ pub async fn run_tool_call_loop(
                 &mut tool_args,
                 channel_name,
                 channel_reply_target.as_deref(),
+                provider_name,
+                active_model.as_str(),
             );
 
             if excluded_tools.iter().any(|ex| ex == &tool_name) {
@@ -2594,6 +2689,7 @@ pub async fn run(
         tracing::info!(count = peripheral_tools.len(), "Peripheral tools added");
         tools_registry.extend(peripheral_tools);
     }
+    let tools_registry = filter_primary_agent_tools_or_fail(&config, tools_registry)?;
 
     // ── Resolve provider ─────────────────────────────────────────
     let provider_name = provider_override
@@ -2782,6 +2878,7 @@ pub async fn run(
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
     }
+    retain_visible_tool_descriptions(&mut tool_descs, &tools_registry);
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -2911,6 +3008,19 @@ pub async fn run(
         }
         println!("{response}");
         observer.record_event(&ObserverEvent::TurnComplete);
+
+        // ── Post-turn fact extraction (single-message mode) ────────
+        if config.memory.auto_save {
+            let turns = vec![(msg.clone(), response.clone())];
+            let _ = extract_facts_from_turns(
+                provider.as_ref(),
+                &model_name,
+                &turns,
+                mem.as_ref(),
+                None,
+            )
+            .await;
+        }
     } else {
         println!("🦀 ZeroClaw Interactive Mode");
         println!("Type /help for commands.\n");
@@ -2919,6 +3029,7 @@ pub async fn run(
         // Persistent conversation history across turns
         let mut history = vec![ChatMessage::system(&system_prompt)];
         let mut interactive_turn: usize = 0;
+        let mut turn_buffer = TurnBuffer::new();
         // Reusable readline editor for UTF-8 input support
         let mut rl = Editor::with_config(
             RlConfig::builder()
@@ -2931,6 +3042,18 @@ pub async fn run(
             let input = match rl.readline("> ") {
                 Ok(line) => line,
                 Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+                    // Flush any remaining buffered turns before exit.
+                    if config.memory.auto_save && !turn_buffer.is_empty() {
+                        let turns = turn_buffer.drain_for_extraction();
+                        let _ = extract_facts_from_turns(
+                            provider.as_ref(),
+                            &model_name,
+                            &turns,
+                            mem.as_ref(),
+                            None,
+                        )
+                        .await;
+                    }
                     break;
                 }
                 Err(e) => {
@@ -2945,7 +3068,21 @@ pub async fn run(
             }
             rl.add_history_entry(&input)?;
             match user_input.as_str() {
-                "/quit" | "/exit" => break,
+                "/quit" | "/exit" => {
+                    // Flush any remaining buffered turns before exit.
+                    if config.memory.auto_save && !turn_buffer.is_empty() {
+                        let turns = turn_buffer.drain_for_extraction();
+                        let _ = extract_facts_from_turns(
+                            provider.as_ref(),
+                            &model_name,
+                            &turns,
+                            mem.as_ref(),
+                            None,
+                        )
+                        .await;
+                    }
+                    break;
+                }
                 "/help" => {
                     println!("Available commands:");
                     println!("  /help        Show this help message");
@@ -2970,6 +3107,7 @@ pub async fn run(
                     history.clear();
                     history.push(ChatMessage::system(&system_prompt));
                     interactive_turn = 0;
+                    turn_buffer = TurnBuffer::new();
                     // Clear conversation and daily memory
                     let mut cleared = 0;
                     for category in [MemoryCategory::Conversation, MemoryCategory::Daily] {
@@ -3133,18 +3271,58 @@ pub async fn run(
             }
             observer.record_event(&ObserverEvent::TurnComplete);
 
+            // ── Post-turn fact extraction ────────────────────────────
+            if config.memory.auto_save {
+                turn_buffer.push(&user_input, &response);
+                if turn_buffer.should_extract() {
+                    let turns = turn_buffer.drain_for_extraction();
+                    let result = extract_facts_from_turns(
+                        provider.as_ref(),
+                        &model_name,
+                        &turns,
+                        mem.as_ref(),
+                        None,
+                    )
+                    .await;
+                    if result.stored > 0 || result.no_facts {
+                        turn_buffer.mark_extract_success();
+                    }
+                }
+            }
+
             // Auto-compaction before hard trimming to preserve long-context signal.
-            if let Ok(compacted) = auto_compact_history(
+            // post_turn_active is only true when auto_save is on AND the
+            // turn buffer confirms recent extraction succeeded; otherwise
+            // compaction must fall back to its own flush_durable_facts.
+            let post_turn_active =
+                config.memory.auto_save && !turn_buffer.needs_compaction_fallback();
+            if let Ok((compacted, flush_ok)) = auto_compact_history(
                 &mut history,
                 provider.as_ref(),
                 &model_name,
                 config.agent.max_history_messages,
                 effective_hooks,
                 Some(mem.as_ref()),
+                None,
+                post_turn_active,
             )
             .await
             {
                 if compacted {
+                    if !post_turn_active {
+                        // Compaction ran its own flush_durable_facts as
+                        // fallback. Drain any buffered turns to prevent
+                        // duplicate extraction.
+                        if !turn_buffer.is_empty() {
+                            let _ = turn_buffer.drain_for_extraction();
+                        }
+                        // Only reset the failure flag when the fallback
+                        // flush actually succeeded; otherwise keep the
+                        // flag so subsequent compactions retry.
+                        if flush_ok {
+                            turn_buffer.mark_extract_success();
+                        }
+                    }
                     println!("🧹 Auto-compaction complete");
                 }
             }
@@ -3224,6 +3402,7 @@ pub async fn process_message_with_session(
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
+    let tools_registry = filter_primary_agent_tools_or_fail(&config, tools_registry)?;
 
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
     let model_name = crate::config::resolve_default_model_id(
@@ -3325,6 +3504,7 @@ pub async fn process_message_with_session(
             "Query connected hardware for reported GPIO pins and LED pin. Use when user asks what pins are available.",
         ));
     }
+    retain_visible_tool_descriptions(&mut tool_descs, &tools_registry);
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -3381,7 +3561,7 @@ pub async fn process_message_with_session(
     } else {
         None
     };
-    scope_cost_enforcement_context(
+    let response = scope_cost_enforcement_context(
         cost_enforcement_context,
         SAFETY_HEARTBEAT_CONFIG.scope(
             hb_cfg,
@@ -3399,7 +3579,22 @@ pub async fn process_message_with_session(
             ),
         ),
     )
-    .await
+    .await?;
+
+    // ── Post-turn fact extraction (channel / single-message-with-session) ──
+    if config.memory.auto_save {
+        let turns = vec![(message.to_owned(), response.clone())];
+        let _ = extract_facts_from_turns(
+            provider.as_ref(),
+            &model_name,
+            &turns,
+            mem.as_ref(),
+            session_id,
+        )
+        .await;
+    }
+
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -3438,11 +3633,19 @@ mod tests {
             "prompt": "remind me later"
         });
 
-        maybe_inject_cron_add_delivery("cron_add", &mut args, "telegram", Some("-10012345"));
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut args,
+            "telegram",
+            Some("-10012345"),
+            "custom:https://llm.example.com/v1",
+            "gpt-oss:20b",
+        );
 
         assert_eq!(args["delivery"]["mode"], "announce");
         assert_eq!(args["delivery"]["channel"], "telegram");
         assert_eq!(args["delivery"]["to"], "-10012345");
+        assert_eq!(args["model"], "gpt-oss:20b");
     }
 
     #[test]
@@ -3457,7 +3660,14 @@ mod tests {
             }
         });
 
-        maybe_inject_cron_add_delivery("cron_add", &mut args, "telegram", Some("-10012345"));
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut args,
+            "telegram",
+            Some("-10012345"),
+            "openrouter",
+            "anthropic/claude-sonnet-4.6",
+        );
 
         assert_eq!(args["delivery"]["channel"], "discord");
         assert_eq!(args["delivery"]["to"], "C123");
@@ -3470,7 +3680,14 @@ mod tests {
             "command": "echo hello"
         });
 
-        maybe_inject_cron_add_delivery("cron_add", &mut args, "telegram", Some("-10012345"));
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut args,
+            "telegram",
+            Some("-10012345"),
+            "openrouter",
+            "anthropic/claude-sonnet-4.6",
+        );
 
         assert!(args.get("delivery").is_none());
     }
@@ -3481,7 +3698,14 @@ mod tests {
             "job_type": "agent",
             "prompt": "daily summary"
         });
-        maybe_inject_cron_add_delivery("cron_add", &mut lark_args, "lark", Some("oc_xxx"));
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut lark_args,
+            "lark",
+            Some("oc_xxx"),
+            "openrouter",
+            "anthropic/claude-sonnet-4.6",
+        );
         assert_eq!(lark_args["delivery"]["channel"], "lark");
         assert_eq!(lark_args["delivery"]["to"], "oc_xxx");
 
@@ -3489,9 +3713,56 @@ mod tests {
             "job_type": "agent",
             "prompt": "daily summary"
         });
-        maybe_inject_cron_add_delivery("cron_add", &mut feishu_args, "feishu", Some("oc_yyy"));
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut feishu_args,
+            "feishu",
+            Some("oc_yyy"),
+            "openrouter",
+            "anthropic/claude-sonnet-4.6",
+        );
         assert_eq!(feishu_args["delivery"]["channel"], "feishu");
         assert_eq!(feishu_args["delivery"]["to"], "oc_yyy");
+    }
+
+    #[test]
+    fn maybe_inject_cron_add_delivery_replaces_legacy_model_on_custom_provider() {
+        let mut args = serde_json::json!({
+            "job_type": "agent",
+            "prompt": "remind me later",
+            "model": "gpt-4o-mini"
+        });
+
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut args,
+            "discord",
+            Some("C123"),
+            "custom:https://somecoolai.endpoint.lan/api/v1",
+            "gpt-oss:20b",
+        );
+
+        assert_eq!(args["model"], "gpt-oss:20b");
+    }
+
+    #[test]
+    fn maybe_inject_cron_add_delivery_keeps_explicit_model_for_non_custom_provider() {
+        let mut args = serde_json::json!({
+            "job_type": "agent",
+            "prompt": "remind me later",
+            "model": "gpt-4o-mini"
+        });
+
+        maybe_inject_cron_add_delivery(
+            "cron_add",
+            &mut args,
+            "discord",
+            Some("C123"),
+            "openrouter",
+            "anthropic/claude-sonnet-4.6",
+        );
+
+        assert_eq!(args["model"], "gpt-4o-mini");
     }
 
     #[test]
