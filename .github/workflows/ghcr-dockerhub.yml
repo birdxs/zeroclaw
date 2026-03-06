@@ -83,8 +83,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          #file: Dockerfilefix
-          file: Dockerfile
+          file: Dockerfilefix
+         # file: Dockerfile
           platforms: linux/amd64,linux/arm64
           #platforms: linux/amd64
           push: true
@@ -94,9 +94,9 @@ jobs:
           labels: ${{ steps.meta-ghcr.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-       # 【新增】传递构建参数：将image_tag作为ZEROCLAW_BUILD_VERSION
-        #  build-args: |
-        #    ZEROCLAW_BUILD_VERSION=${{ inputs.image_tag }}          
+        #【新增】传递构建参数：将image_tag作为ZEROCLAW_BUILD_VERSION
+          build-args: |
+            ZEROCLAW_BUILD_VERSION=${{ inputs.image_tag }}          
 
       - name: Generate summary
         run: |
