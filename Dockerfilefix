@@ -33,16 +33,16 @@ RUN mkdir -p src benches crates/robot-kit/src crates/zeroclaw-types/src crates/z
     && echo "pub fn placeholder() {}" > crates/zeroclaw-types/src/lib.rs \
     && echo "pub fn placeholder() {}" > crates/zeroclaw-core/src/lib.rs
 
-# 【关键修改1】：缓存依赖阶段移除--locked参数（避免dummy文件导致锁文件更新冲突）
+# 【关键修复】：确保每一行末尾的\完整，且无多余空格
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
     if [ "$ZEROCLAW_CARGO_ALL_FEATURES" = "true" ]; then \
-      cargo build --release --all-features;  # 移除--locked
+      cargo build --release --all-features; \
     elif [ -n "$ZEROCLAW_CARGO_FEATURES" ]; then \
-      cargo build --release --features "$ZEROCLAW_CARGO_FEATURES";  # 移除--locked
+      cargo build --release --features "$ZEROCLAW_CARGO_FEATURES"; \
     else \
-      cargo build --release;  # 移除--locked
+      cargo build --release; \
     fi
 
 RUN rm -rf src benches crates/robot-kit/src crates/zeroclaw-types/src crates/zeroclaw-core/src
@@ -73,7 +73,7 @@ RUN mkdir -p web/dist && \
         '</html>' > web/dist/index.html; \
     fi
 
-# 【关键修改2】：真实编译阶段保留--locked参数（确保依赖版本稳定）
+# 【关键修复】：：真实编译阶段保留--locked参数（确保依赖版本稳定）
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
