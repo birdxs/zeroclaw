@@ -38,6 +38,7 @@ pub mod traits;
 pub mod transcription;
 pub mod tts;
 pub mod wati;
+pub mod wecom;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
 pub mod whatsapp_storage;
@@ -68,6 +69,7 @@ pub use traits::{Channel, SendMessage};
 #[allow(unused_imports)]
 pub use tts::{TtsManager, TtsProvider};
 pub use wati::WatiChannel;
+pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
 pub use whatsapp_web::WhatsAppWebChannel;
@@ -84,16 +86,13 @@ use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
+use portable_atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(not(target_has_atomic = "64"))]
-use std::sync::atomic::AtomicU32;
-#[cfg(target_has_atomic = "64")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -296,6 +295,7 @@ struct ChannelRuntimeContext {
     non_cli_excluded_tools: Arc<Vec<String>>,
     tool_call_dedup_exempt: Arc<Vec<String>>,
     model_routes: Arc<Vec<crate::config::ModelRouteConfig>>,
+    ack_reactions: bool,
 }
 
 #[derive(Clone)]
@@ -1883,12 +1883,14 @@ async fn process_channel_message(
     };
 
     // React with 👀 to acknowledge the incoming message
-    if let Some(channel) = target_channel.as_ref() {
-        if let Err(e) = channel
-            .add_reaction(&msg.reply_target, &msg.id, "\u{1F440}")
-            .await
-        {
-            tracing::debug!("Failed to add reaction: {e}");
+    if ctx.ack_reactions {
+        if let Some(channel) = target_channel.as_ref() {
+            if let Err(e) = channel
+                .add_reaction(&msg.reply_target, &msg.id, "\u{1F440}")
+                .await
+            {
+                tracing::debug!("Failed to add reaction: {e}");
+            }
         }
     }
 
@@ -2324,13 +2326,15 @@ async fn process_channel_message(
     }
 
     // Swap 👀 → ✅ (or ⚠️ on error) to signal processing is complete
-    if let Some(channel) = target_channel.as_ref() {
-        let _ = channel
-            .remove_reaction(&msg.reply_target, &msg.id, "\u{1F440}")
-            .await;
-        let _ = channel
-            .add_reaction(&msg.reply_target, &msg.id, reaction_done_emoji)
-            .await;
+    if ctx.ack_reactions {
+        if let Some(channel) = target_channel.as_ref() {
+            let _ = channel
+                .remove_reaction(&msg.reply_target, &msg.id, "\u{1F440}")
+                .await;
+            let _ = channel
+                .add_reaction(&msg.reply_target, &msg.id, reaction_done_emoji)
+                .await;
+        }
     }
 }
 
@@ -2990,6 +2994,7 @@ fn collect_configured_channels(
     config: &Config,
     matrix_skip_context: &str,
 ) -> Vec<ConfiguredChannel> {
+    let _ = matrix_skip_context;
     let mut channels = Vec::new();
 
     if let Some(ref tg) = config.channels_config.telegram {
@@ -3267,6 +3272,16 @@ fn collect_configured_channels(
         });
     }
 
+    if let Some(ref wc) = config.channels_config.wecom {
+        channels.push(ConfiguredChannel {
+            display_name: "WeCom",
+            channel: Arc::new(WeComChannel::new(
+                wc.webhook_key.clone(),
+                wc.allowed_users.clone(),
+            )),
+        });
+    }
+
     if let Some(ref ct) = config.channels_config.clawdtalk {
         channels.push(ConfiguredChannel {
             display_name: "ClawdTalk",
@@ -3348,6 +3363,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
         provider_timeout_secs: Some(config.provider_timeout_secs),
+        extra_headers: config.extra_headers.clone(),
     };
     let provider: Arc<dyn Provider> = Arc::from(
         create_resilient_provider_nonblocking(
@@ -3407,21 +3423,22 @@ pub async fn start_channels(config: Config) -> Result<()> {
     };
     // Build system prompt from workspace identity files + skills
     let workspace = config.workspace_dir.clone();
-    let mut built_tools = tools::all_tools_with_runtime(
-        Arc::new(config.clone()),
-        &security,
-        runtime,
-        Arc::clone(&mem),
-        composio_key,
-        composio_entity_id,
-        &config.browser,
-        &config.http_request,
-        &config.web_fetch,
-        &workspace,
-        &config.agents,
-        config.api_key.as_deref(),
-        &config,
-    );
+    let (mut built_tools, delegate_handle_ch): (Vec<Box<dyn Tool>>, _) =
+        tools::all_tools_with_runtime(
+            Arc::new(config.clone()),
+            &security,
+            runtime,
+            Arc::clone(&mem),
+            composio_key,
+            composio_entity_id,
+            &config.browser,
+            &config.http_request,
+            &config.web_fetch,
+            &workspace,
+            &config.agents,
+            config.api_key.as_deref(),
+            &config,
+        );
 
     // Wire MCP tools into the registry before freezing — non-fatal.
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
@@ -3429,19 +3446,23 @@ pub async fn start_channels(config: Config) -> Result<()> {
             "Initializing MCP client — {} server(s) configured",
             config.mcp.servers.len()
         );
-        match crate::tools::mcp_client::McpRegistry::connect_all(&config.mcp.servers).await {
+        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
             Ok(registry) => {
                 let registry = std::sync::Arc::new(registry);
                 let names = registry.tool_names();
                 let mut registered = 0usize;
                 for name in names {
                     if let Some(def) = registry.get_tool_def(&name).await {
-                        let wrapper = crate::tools::mcp_tool::McpToolWrapper::new(
-                            name,
-                            def,
-                            std::sync::Arc::clone(&registry),
-                        );
-                        built_tools.push(Box::new(wrapper));
+                        let wrapper: std::sync::Arc<dyn Tool> =
+                            std::sync::Arc::new(crate::tools::McpToolWrapper::new(
+                                name,
+                                def,
+                                std::sync::Arc::clone(&registry),
+                            ));
+                        if let Some(ref handle) = delegate_handle_ch {
+                            handle.write().push(std::sync::Arc::clone(&wrapper));
+                        }
+                        built_tools.push(Box::new(crate::tools::ArcToolRef(wrapper)));
                         registered += 1;
                     }
                 }
@@ -3684,6 +3705,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
         tool_call_dedup_exempt: Arc::new(config.agent.tool_call_dedup_exempt.clone()),
         model_routes: Arc::new(config.model_routes.clone()),
+        ack_reactions: config.channels_config.ack_reactions,
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -3946,6 +3968,7 @@ mod tests {
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -3997,6 +4020,7 @@ mod tests {
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -4051,6 +4075,7 @@ mod tests {
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4528,6 +4553,7 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -4590,6 +4616,7 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -4666,6 +4693,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -4727,6 +4755,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -4798,6 +4827,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -4889,6 +4919,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -4962,6 +4993,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -5050,6 +5082,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -5123,6 +5156,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -5186,6 +5220,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -5360,6 +5395,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -5442,6 +5478,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5536,6 +5573,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5612,6 +5650,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -5673,6 +5712,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -6232,6 +6272,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -6319,6 +6360,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -6406,6 +6448,7 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
@@ -6957,6 +7000,7 @@ This is an example JSON object for profile settings."#;
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -7025,6 +7069,7 @@ This is an example JSON object for profile settings."#;
             non_cli_excluded_tools: Arc::new(Vec::new()),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            ack_reactions: true,
         });
 
         process_channel_message(
