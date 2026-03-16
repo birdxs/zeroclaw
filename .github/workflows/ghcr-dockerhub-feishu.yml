@@ -1,4 +1,4 @@
-name: 增加飞书频道 kimi 优化加速编译Build and Push Multi-Arch Docker Images (Optimized)
+name: kimi 增加飞书频道优化加速编译Build and Push Multi-Arch Docker Images (Optimized)
 
 on:
   workflow_dispatch:
