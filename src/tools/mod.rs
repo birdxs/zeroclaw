@@ -50,6 +50,7 @@ pub mod memory_recall;
 pub mod memory_store;
 pub mod model_routing_config;
 pub mod node_tool;
+pub mod notion_tool;
 pub mod pdf_read;
 pub mod proxy_config;
 pub mod pushover;
@@ -62,6 +63,7 @@ pub mod tool_search;
 pub mod traits;
 pub mod web_fetch;
 pub mod web_search_tool;
+pub mod workspace_tool;
 
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
@@ -96,6 +98,7 @@ pub use memory_store::MemoryStoreTool;
 pub use model_routing_config::ModelRoutingConfigTool;
 #[allow(unused_imports)]
 pub use node_tool::NodeTool;
+pub use notion_tool::NotionTool;
 pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
@@ -111,6 +114,7 @@ pub use traits::Tool;
 pub use traits::{ToolResult, ToolSpec};
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
+pub use workspace_tool::WorkspaceTool;
 
 use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
@@ -342,6 +346,22 @@ pub fn all_tools_with_runtime(
         )));
     }
 
+    // Notion API tool (conditionally registered)
+    if root_config.notion.enabled {
+        let notion_api_key = if root_config.notion.api_key.trim().is_empty() {
+            std::env::var("NOTION_API_KEY").unwrap_or_default()
+        } else {
+            root_config.notion.api_key.trim().to_string()
+        };
+        if notion_api_key.trim().is_empty() {
+            tracing::warn!(
+                "Notion tool enabled but no API key found (set notion.api_key or NOTION_API_KEY env var)"
+            );
+        } else {
+            tool_arcs.push(Arc::new(NotionTool::new(notion_api_key, security.clone())));
+        }
+    }
+
     // PDF extraction (feature-gated at compile time via rag-pdf)
     tool_arcs.push(Arc::new(PdfReadTool::new(security.clone())));
 
@@ -410,6 +430,23 @@ pub fn all_tools_with_runtime(
             delegate_fallback_credential,
             security.clone(),
             provider_runtime_options,
+        )));
+    }
+
+    // Workspace management tool (conditionally registered when workspace isolation is enabled)
+    if root_config.workspace.enabled {
+        let workspaces_dir = if root_config.workspace.workspaces_dir.starts_with("~/") {
+            let home = directories::UserDirs::new()
+                .map(|u| u.home_dir().to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            home.join(&root_config.workspace.workspaces_dir[2..])
+        } else {
+            std::path::PathBuf::from(&root_config.workspace.workspaces_dir)
+        };
+        let ws_manager = crate::config::workspace::WorkspaceManager::new(workspaces_dir);
+        tool_arcs.push(Arc::new(WorkspaceTool::new(
+            Arc::new(tokio::sync::RwLock::new(ws_manager)),
+            security.clone(),
         )));
     }
 
