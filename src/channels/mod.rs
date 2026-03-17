@@ -329,6 +329,7 @@ struct ChannelRuntimeContext {
     /// `[autonomy]` config; auto-denies tools that would need interactive
     /// approval since no operator is present on channel runs.
     approval_manager: Arc<ApprovalManager>,
+    activated_tools: Option<std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
 }
 
 #[derive(Clone)]
@@ -2140,6 +2141,7 @@ async fn process_channel_message(
                     ctx.non_cli_excluded_tools.as_ref()
                 },
                 ctx.tool_call_dedup_exempt.as_ref(),
+                ctx.activated_tools.as_ref(),
             ),
         ) => LlmExecutionResult::Completed(result),
     };
@@ -3236,6 +3238,7 @@ fn collect_configured_channels(
                     Vec::new(),
                     sl.allowed_users.clone(),
                 )
+                .with_group_reply_policy(sl.mention_only, Vec::new())
                 .with_workspace_dir(config.workspace_dir.clone()),
             ),
         });
@@ -3699,6 +3702,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // When `deferred_loading` is enabled, MCP tools are NOT added eagerly.
     // Instead, a `tool_search` built-in is registered for on-demand loading.
     let mut deferred_section = String::new();
+    let mut ch_activated_handle: Option<
+        std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>,
+    > = None;
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
         tracing::info!(
             "Initializing MCP client — {} server(s) configured",
@@ -3722,6 +3728,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
                     let activated = std::sync::Arc::new(std::sync::Mutex::new(
                         crate::tools::ActivatedToolSet::new(),
                     ));
+                    ch_activated_handle = Some(std::sync::Arc::clone(&activated));
                     built_tools.push(Box::new(crate::tools::ToolSearchTool::new(
                         deferred_set,
                         activated,
@@ -4016,6 +4023,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
             None
         },
         approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
+        activated_tools: ch_activated_handle,
     });
 
     // Hydrate in-memory conversation histories from persisted JSONL session files.
@@ -4308,6 +4316,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -4416,6 +4425,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -4480,6 +4490,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4563,6 +4574,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         assert!(rollback_orphan_user_turn(
@@ -5096,6 +5108,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5168,6 +5181,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5254,6 +5268,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5325,6 +5340,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5406,6 +5422,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5507,6 +5524,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5590,6 +5608,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5688,6 +5707,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5771,6 +5791,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5844,6 +5865,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -6028,6 +6050,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -6120,6 +6143,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -6226,6 +6250,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
             query_classification: crate::config::QueryClassificationConfig::default(),
         });
 
@@ -6331,6 +6356,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -6417,6 +6443,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -6488,6 +6515,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7117,6 +7145,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7214,6 +7243,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7311,6 +7341,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7872,6 +7903,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -7950,6 +7982,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8102,6 +8135,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8204,6 +8238,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8298,6 +8333,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8412,6 +8448,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
