@@ -11,10 +11,9 @@ on:
 env:
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
-  # GitHub 仓库全名作为 GHCR 镜像名
-  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/zeroclaw.debian
-  # Docker Hub 镜像名（需要根据实际情况设置）
-  DOCKERHUB_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/zeroclaw.debian
+  # 同样推送到 zeroclaw 仓库
+  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/zeroclaw
+  DOCKERHUB_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/zeroclaw
 
 jobs:
   # AMD64 构建任务
@@ -27,7 +26,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to registries
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.GHCR_REGISTRY }}
@@ -41,7 +40,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push AMD64
+      - name: Build and push AMD64 (debian variant)
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -49,14 +48,14 @@ jobs:
           file: Dockerfile.debianfix
           push: true
           tags: |
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-amd64
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-amd64
-          cache-from: type=gha,scope=amd64
-          cache-to: type=gha,mode=max,scope=amd64
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-amd64
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-amd64
+          cache-from: type=gha,scope=zeroclaw-debian-amd64
+          cache-to: type=gha,mode=max,scope=zeroclaw-debian-amd64
 
-  # ARM64 原生构建任务（关键优化！）
+  # ARM64 原生构建任务
   build-arm64:
-    runs-on: ubuntu-24.04-arm  # GitHub 免费 ARM64 runner
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,7 +63,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to registries
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.GHCR_REGISTRY }}
@@ -78,7 +77,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push ARM64
+      - name: Build and push ARM64 (debian variant)
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -86,12 +85,12 @@ jobs:
           file: Dockerfile.debianfix
           push: true
           tags: |
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-arm64
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-arm64
-          cache-from: type=gha,scope=arm64
-          cache-to: type=gha,mode=max,scope=arm64
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-arm64
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-arm64
+          cache-from: type=gha,scope=zeroclaw-debian-arm64
+          cache-to: type=gha,mode=max,scope=zeroclaw-debian-arm64
 
-  # 合并 manifest
+  # 合并 manifest（生成带 -debian 后缀的版本标签和固定的 debian 标签）
   merge-manifests:
     needs: [build-amd64, build-arm64]
     runs-on: ubuntu-24.04
@@ -113,16 +112,16 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Create and push multi-arch manifests
+      - name: Create and push multi-arch manifests for debian variant
         run: |
-          # GHCR Manifest
-          docker buildx imagetools create -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }} \
-            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:latest \
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-amd64 \
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-arm64
+          # GHCR Manifest (debian)
+          docker buildx imagetools create -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian \
+            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:debian \
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-amd64 \
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-arm64
 
-          # Docker Hub Manifest  
-          docker buildx imagetools create -t ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }} \
-            -t ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:latest \
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-amd64 \
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-arm64
+          # Docker Hub Manifest (debian)
+          docker buildx imagetools create -t ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-debian \
+            -t ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:debian \
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-amd64 \
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-arm64
