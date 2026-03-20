@@ -1,4 +1,4 @@
-name: kimi 优化加速编译Build and Push Multi-Arch Docker Images (Optimized)
+name: kimi 优化加速编译zeroclaw.debian
 
 on:
   workflow_dispatch:
