@@ -41,6 +41,9 @@ COPY Cargo.toml Cargo.lock ./
 # Remove robot-kit from workspace members — it is excluded by .dockerignore
 # and is not needed for the Docker build (hardware-only crate).
 RUN sed -i 's/members = \[".", "crates\/robot-kit"\]/members = ["."]/' Cargo.toml
+# 同步更新 Cargo.lock 以反映 workspace 变化（--locked 要求 lock 文件与 manifest 一致）kimi20260320优化
+RUN cargo update --workspace
+
 # Create dummy targets declared in Cargo.toml so manifest parsing succeeds.
 RUN mkdir -p src benches \
     && echo "fn main() {}" > src/main.rs \
