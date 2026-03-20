@@ -11,8 +11,10 @@ on:
 env:
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
-  GHCR_IMAGE_NAME: ${{ github.repository }}
-  DOCKERHUB_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+  # GitHub 仓库全名作为 GHCR 镜像名
+  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/zeroclaw.debian
+  # Docker Hub 镜像名（需要根据实际情况设置）
+  DOCKERHUB_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/zeroclaw.debian
 
 jobs:
   # AMD64 构建任务
