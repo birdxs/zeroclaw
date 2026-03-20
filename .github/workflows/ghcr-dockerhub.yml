@@ -1,4 +1,4 @@
-name: kimi优化加速编译zeroclaw
+name: kimi 优化加速编译zeroclaw
 
 on:
   workflow_dispatch:
