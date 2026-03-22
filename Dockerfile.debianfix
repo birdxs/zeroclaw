@@ -44,7 +44,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/robot-kit/ crates/robot-kit/
 COPY crates/aardvark-sys/ crates/aardvark-sys/
 # 同步更新 Cargo.lock 以反映 workspace 变化（--locked 要求 lock 文件与 manifest 一致）kimi20260320优化
-RUN cargo update --workspace
+#RUN cargo update --workspace
 
 # Create dummy targets declared in Cargo.toml so manifest parsing succeeds.
 RUN mkdir -p src benches \
