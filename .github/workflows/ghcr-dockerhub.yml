@@ -45,7 +45,8 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          file: Dockerfilefix
+          #file: Dockerfilefix
+          file: Dockerfile
           push: true
           tags: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-amd64
@@ -82,7 +83,8 @@ jobs:
         with:
           context: .
           platforms: linux/arm64
-          file: Dockerfilefix
+         # file: Dockerfilefix
+          file: Dockerfile
           push: true
           tags: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-arm64
