@@ -41,10 +41,11 @@ COPY Cargo.toml Cargo.lock ./
 # Include every workspace member: Cargo.lock is generated for the full workspace.
 # Previously we used sed to drop `crates/robot-kit`, which made the manifest disagree
 # with the lockfile and caused `cargo --locked` to fail (Cargo refused to rewrite the lock).
-COPY crates/robot-kit/ crates/robot-kit/
-COPY crates/aardvark-sys/ crates/aardvark-sys/
+#COPY crates/robot-kit/ crates/robot-kit/
+#COPY crates/aardvark-sys/ crates/aardvark-sys/
+COPY crates/ crates/
 # 同步更新 Cargo.lock 以反映 workspace 变化（--locked 要求 lock 文件与 manifest 一致）kimi20260320优化
-#RUN cargo update --workspace
+# RUN cargo update --workspace
 
 # Create dummy targets declared in Cargo.toml so manifest parsing succeeds.
 RUN mkdir -p src benches \
