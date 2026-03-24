@@ -15,6 +15,7 @@
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
+pub mod ask_user;
 pub mod backup_tool;
 pub mod browser;
 pub mod browser_delegate;
@@ -105,6 +106,7 @@ mod web_search_provider_routing;
 pub mod web_search_tool;
 pub mod workspace_tool;
 
+pub use ask_user::AskUserTool;
 pub use backup_tool::BackupTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 #[allow(unused_imports)]
@@ -340,6 +342,7 @@ pub fn all_tools(
     Option<DelegateParentToolsHandle>,
     Option<ChannelMapHandle>,
     ChannelMapHandle,
+    Option<ChannelMapHandle>,
 ) {
     all_tools_with_runtime(
         config,
@@ -385,15 +388,15 @@ pub fn all_tools_with_runtime(
     Option<DelegateParentToolsHandle>,
     Option<ChannelMapHandle>,
     ChannelMapHandle,
+    Option<ChannelMapHandle>,
 ) {
     let has_shell_access = runtime.has_shell_access();
     let sandbox = create_sandbox(&root_config.security);
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(ShellTool::new_with_sandbox(
-            security.clone(),
-            runtime,
-            sandbox,
-        )),
+        Arc::new(
+            ShellTool::new_with_sandbox(security.clone(), runtime, sandbox)
+                .with_timeout_secs(root_config.shell_tool.timeout_secs),
+        ),
         Arc::new(FileReadTool::new(security.clone())),
         Arc::new(FileWriteTool::new(security.clone())),
         Arc::new(FileEditTool::new(security.clone())),
@@ -787,6 +790,11 @@ pub fn all_tools_with_runtime(
     let reaction_handle = reaction_tool.channel_map_handle();
     tool_arcs.push(Arc::new(reaction_tool));
 
+    // Interactive ask_user tool — always registered; channel map populated later by start_channels.
+    let ask_user_tool = AskUserTool::new(security.clone());
+    let ask_user_handle = ask_user_tool.channel_map_handle();
+    tool_arcs.push(Arc::new(ask_user_tool));
+
     // Microsoft 365 Graph API integration
     if root_config.microsoft365.enabled {
         let ms_cfg = &root_config.microsoft365;
@@ -818,6 +826,7 @@ pub fn all_tools_with_runtime(
                     None,
                     Some(reaction_handle),
                     channel_map_handle,
+                    Some(ask_user_handle),
                 );
             }
 
@@ -1007,6 +1016,7 @@ pub fn all_tools_with_runtime(
         delegate_handle,
         Some(reaction_handle),
         channel_map_handle,
+        Some(ask_user_handle),
     )
 }
 
@@ -1051,7 +1061,7 @@ mod tests {
         let http = crate::config::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
-        let (tools, _, _, _) = all_tools(
+        let (tools, _, _, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -1094,7 +1104,7 @@ mod tests {
         let http = crate::config::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
-        let (tools, _, _, _) = all_tools(
+        let (tools, _, _, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -1248,7 +1258,7 @@ mod tests {
             },
         );
 
-        let (tools, _, _, _) = all_tools(
+        let (tools, _, _, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -1282,7 +1292,7 @@ mod tests {
         let http = crate::config::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
-        let (tools, _, _, _) = all_tools(
+        let (tools, _, _, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -1317,7 +1327,7 @@ mod tests {
         let mut cfg = test_config(&tmp);
         cfg.skills.prompt_injection_mode = crate::config::SkillsPromptInjectionMode::Compact;
 
-        let (tools, _, _, _) = all_tools(
+        let (tools, _, _, _, _) = all_tools(
             Arc::new(cfg.clone()),
             &security,
             mem,
@@ -1352,7 +1362,7 @@ mod tests {
         let mut cfg = test_config(&tmp);
         cfg.skills.prompt_injection_mode = crate::config::SkillsPromptInjectionMode::Full;
 
-        let (tools, _, _, _) = all_tools(
+        let (tools, _, _, _, _) = all_tools(
             Arc::new(cfg.clone()),
             &security,
             mem,
