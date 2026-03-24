@@ -45,8 +45,8 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          file: Dockerfile.debianfix
-          #file: Dockerfile.debian
+          #file: Dockerfile.debianfix
+          file: Dockerfile.debian
           push: true
           tags: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-amd64
@@ -83,8 +83,8 @@ jobs:
         with:
           context: .
           platforms: linux/arm64
-          file: Dockerfile.debianfix
-          #file: Dockerfile.debian
+          #file: Dockerfile.debianfix
+          file: Dockerfile.debian
           push: true
           tags: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:${{ inputs.image_tag }}-debian-arm64
