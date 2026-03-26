@@ -27,7 +27,7 @@ RUN npm run build
 FROM rust:1.94-bookworm AS builder
 
 WORKDIR /app
-ARG ZEROCLAW_CARGO_FEATURES="memory-postgres"
+ARG ZEROCLAW_CARGO_FEATURES="channel-lark,whatsapp-web"
 
 # Install build dependencies
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -42,11 +42,7 @@ COPY Cargo.toml Cargo.lock ./
 # Previously we used sed to drop `crates/robot-kit`, which made the manifest disagree
 # with the lockfile and caused `cargo --locked` to fail (Cargo refused to rewrite the lock).
 #COPY crates/robot-kit/ crates/robot-kit/
-#COPY crates/aardvark-sys/ crates/aardvark-sys/
 COPY crates/ crates/
-# 同步更新 Cargo.lock 以反映 workspace 变化（--locked 要求 lock 文件与 manifest 一致）kimi20260320优化
- RUN cargo update --workspace
-
 # Create dummy targets declared in Cargo.toml so manifest parsing succeeds.
 RUN mkdir -p src benches \
     && echo "fn main() {}" > src/main.rs \
@@ -94,6 +90,10 @@ RUN mkdir -p /zeroclaw-data/.zeroclaw /zeroclaw-data/workspace && \
         'port = 42617' \
         'host = "[::]"' \
         'allow_public_bind = true' \
+        '' \
+        '[autonomy]' \
+        'level = "supervised"' \
+        'auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory_store", "web_search_tool", "web_fetch", "calculator", "glob_search", "content_search", "image_info", "weather", "git_operations"]' \
         > /zeroclaw-data/.zeroclaw/config.toml && \
     chown -R 65534:65534 /zeroclaw-data
 
