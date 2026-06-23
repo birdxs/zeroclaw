@@ -26,6 +26,7 @@
       "program": "${workspaceFolder}/target/debug/zeroclaw",
       "args": ["gateway"],
       "cwd": "${workspaceFolder}",
+      "env": { "ZEROCLAW_REQUIRE_PAIRING": "false" },
       "preLaunchTask": "Build: Debug"
     },
     {
@@ -49,11 +50,19 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Onboard",
+      "name": "Debug: Quickstart",
       "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": ["onboard"],
+      "args": ["quickstart"],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "Build: Debug"
+    },
+    // ── Dev (browser) ────────────────────────────────────
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "Dev: Browser",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder}/web/src"
     },
     // ── Test ──────────────────────────────────────────────
     {
@@ -68,6 +77,18 @@
       },
       "args": ["--exact", "${input:testName}", "--nocapture"],
       "cwd": "${workspaceFolder}"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Dev: Full Stack",
+      "configurations": ["Dev: Browser"],
+      "preLaunchTask": "Dev: Full Stack (tasks)",
+      "stopAll": true,
+      "presentation": {
+        "order": 1,
+        "group": "dev"
+      }
     }
   ]
 }
